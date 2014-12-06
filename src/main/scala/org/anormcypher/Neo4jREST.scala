@@ -1,49 +1,102 @@
 package org.anormcypher
 
-import dispatch._
-import dispatch.Defaults._
 import org.anormcypher.MayErr._
 import play.api.libs.json.Json._
 import play.api.libs.json._
+import uk.co.bigbeeconsultants.http.HttpClient
+import uk.co.bigbeeconsultants.http._
+import request.Request
+import header.Headers
+import uk.co.bigbeeconsultants.http._
+import uk.co.bigbeeconsultants.http.request.RequestBody
+import uk.co.bigbeeconsultants.http.header.MediaType._
 
-object Neo4jREST {
 
-  val headers = Map(
+class Neo4jREST(val host: String = "localhost", val port: Int = 7474, val path: String = "/db/data/",
+                val username: String = "", val password: String = "",
+                val cypherEndpoint: String = "cypher", val https: Boolean = false) {
+
+  private val headers = Map(
     "accept" -> "application/json",
     "content-type" -> "application/json",
     "X-Stream" -> "true",
-    "User-Agent" -> "AnormCypher/0.5.1"
+    "User-Agent" -> "AnormCypher/0.6.0"
   )
-  val charset = "UTF-8"
+  private val charset = "UTF-8"
 
-  var baseURL = "http://localhost:7474/db/data/"
-  var user = ""
-  var pass = ""
-  var cypherEndpoint = "cypher"
-
-  def setServer(host: String = "localhost", port: Int = 7474, path: String = "/db/data/", endpoint:String = "cypher") {
-    setServer(host, port, path, "", "", endpoint)
+  private val baseURL = {
+    val protocol = if (https) "https" else "http"
+    val pth = path.stripPrefix("/")
+    s"$protocol://$host:$port/$pth"
   }
 
-  def setServer(host: String, port: Int, path: String, username: String, password: String) {
-    baseURL = "http://" + host + ":" + port + path
-    user = username
-    pass = password
+  def sendQuery(cypherStatement: CypherStatement): Stream[CypherResultRow] = {
+    implicit val csw = Neo4jREST.cypherStatementWrites
+    implicit val csr = Neo4jREST.cypherRESTResultReads
+    var address = baseURL + cypherEndpoint
+    var params = Json.prettyPrint(Json.toJson(cypherStatement))
+
+    var httpClient = new HttpClient
+    val requestBody = RequestBody(params, APPLICATION_JSON)
+    var request = Request.post(address, Some(requestBody))
+    var response = httpClient.makeRequest(request + Headers.apply(headers))
+
+    var strResult = response.body.asString
+    if (response.status.code != 200) throw new RuntimeException(strResult)
+    val cypherRESTResult = Json.fromJson[CypherRESTResult](Json.parse(strResult)).get
+    val metaDataItems = cypherRESTResult.columns.map {
+      c => MetaDataItem(c, false, "String")
+    }.toList
+    val metaData = MetaData(metaDataItems)
+    val data = cypherRESTResult.data.map {
+      d => CypherResultRow(metaData, d.toList)
+    }.toStream
+    data
   }
 
-  def setServer(host: String, port: Int, path: String, username: String, password: String, endpoint:String) {
-    baseURL = "http://" + host + ":" + port + path
-    user = username
-    pass = password
-  }
-  
-  def setCypherEndpoint(endpoint: String) {
-    cypherEndpoint = endpoint;
+  def sendQueryString(cypherStatement: CypherStatement): String = {
+    implicit val csw = Neo4jREST.cypherStatementWrites
+    implicit val csr = Neo4jREST.cypherRESTResultReads
+    var address = baseURL + cypherEndpoint
+    var params = Json.prettyPrint(Json.toJson(cypherStatement))
+
+    var httpClient = new HttpClient
+    val requestBody = RequestBody(params, APPLICATION_JSON)
+    var request = Request.post(address, Some(requestBody))
+    var response = httpClient.makeRequest(request + Headers.apply(headers))
+
+    val strResult = response.body.asString
+    if (response.status.code != 200) throw new RuntimeException(strResult)
+    strResult
   }
 
-  def setURL(url: String) {
-    baseURL = url
+  def sendQueryPath(cypherStatement: CypherStatement, cypherPath: String): Stream[CypherResultRow] = {
+    implicit val csw = Neo4jREST.cypherStatementWrites
+    implicit val csr = Neo4jREST.cypherRESTResultReads
+    var address = baseURL + cypherPath
+    var params = Json.prettyPrint(Json.toJson(cypherStatement))
+
+    var httpClient = new HttpClient
+
+    val response = httpClient.get(address, Headers.apply(headers))
+    var strResult = response.body.asString
+    if (response.status.code != 200) throw new RuntimeException(strResult)
+    val cypherRESTResult = Json.fromJson[CypherRESTResult](Json.parse(strResult)).get
+    val metaDataItems = cypherRESTResult.columns.map {
+      c => MetaDataItem(c, false, "String")
+    }.toList
+    val metaData = MetaData(metaDataItems)
+    val data = cypherRESTResult.data.map {
+      d => CypherResultRow(metaData, d.toList)
+    }.toStream
+    data
   }
+}
+
+object Neo4jREST {
+  def apply(host: String = "localhost", port: Int = 7474, path: String = "/db/data/",
+            username: String = "", password: String = "", cypherEndpoint: String = "cypher", https: Boolean = false) =
+    new Neo4jREST(host, port, path, username, password, cypherEndpoint, https)
 
   implicit val mapFormat = new Format[Map[String, Any]] {
     def read(xs: Seq[(String, JsValue)]): Map[String, Any] = (xs map {
@@ -98,8 +151,8 @@ object Neo4jREST {
               key -> JsArray(ss.map(s => JsString(s.asInstanceOf[String])))
             case sam: Map[_, _] if (sam.keys.forall(_.isInstanceOf[String])) =>
               key -> writes(sam.asInstanceOf[Map[String, Any]])
-            case sm: Seq[Map[_,_]] if (sm.forall(_.isInstanceOf[Map[String,Any]])) =>
-              key -> JsArray(sm.map(m => writes(m.asInstanceOf[Map[String,Any]])))
+            case sm: Seq[Map[_, _]] if (sm.forall(_.isInstanceOf[Map[String, Any]])) =>
+              key -> JsArray(sm.map(m => writes(m.asInstanceOf[Map[String, Any]])))
             case xs: Seq[_] => throw new RuntimeException(s"unsupported Neo4j array type: $xs (mixed types?)")
             case x => throw new RuntimeException(s"unsupported Neo4j type: $x")
           }
@@ -128,30 +181,6 @@ object Neo4jREST {
   }
 
   implicit val cypherRESTResultReads = Json.reads[CypherRESTResult]
-
-  def sendQuery(cypherStatement: CypherStatement): Stream[CypherResultRow] = {
-
-    val cypherRequest = url(baseURL + cypherEndpoint).POST <<
-                                    Json.prettyPrint(Json.toJson(cypherStatement)) <:<
-                                    headers
-    cypherRequest.setBodyEncoding(charset)
-    val result = Http(cypherRequest.as_!(user, pass))
-    //TODO: check why we are blocking here...
-    val response = result()
-
-    val strResult = response.getResponseBody(charset)
-    if (response.getStatusCode != 200) throw new RuntimeException(strResult)
-
-    val cypherRESTResult = Json.fromJson[CypherRESTResult](Json.parse(strResult)).get
-    val metaDataItems = cypherRESTResult.columns.map {
-      c => MetaDataItem(c, false, "String")
-    }.toList
-    val metaData = MetaData(metaDataItems)
-    val data = cypherRESTResult.data.map {
-      d => CypherResultRow(metaData, d.toList)
-    }.toStream
-    data
-  }
 
   object IdURLExtractor {
     def unapply(s: String) = s.lastIndexOf('/') match {

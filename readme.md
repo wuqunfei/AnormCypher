@@ -1,3 +1,9 @@
+## Fix bugs if blocking
+
+Line 139 in Neo4jRest.scala    //TODO: check why we are blocking here...
+Not blocking now
+
+
 ## AnormCypher
 This is a Neo4j client library for the HTTP Cypher endpoints.
 
